@@ -71,6 +71,18 @@ async function fetchAllEvents() {
   return { events: allEvents, totalCount };
 }
 
+// Keep one copy of each event. Paging over a non-unique sort (many events
+// share the same endsOn) can return the same event on two pages.
+function dedupeById(events: any[]) {
+  const eventsById = new Map<string, any>();
+
+  for (const event of events) {
+    eventsById.set(String(event.id), event);
+  }
+
+  return [...eventsById.values()];
+}
+
 const LOCATION_COORDS: Record<string, [number, number]> = {
         // O'Neill Library / O'Neill Plaza area
         "O'Neill Plaza": [42.33535, -71.16945],
@@ -103,9 +115,20 @@ const LOCATION_COORDS: Record<string, [number, number]> = {
       };
 async function syncEvents() {
   try {
-    const { events, totalCount } = await fetchAllEvents()
+    const { events: fetchedEvents, totalCount } = await fetchAllEvents()
+    const events = dedupeById(fetchedEvents)
+    const duplicateCount = fetchedEvents.length - events.length
 
-    console.log(`Fetched ${events.length} events (API reports ${totalCount})`)
+    console.log(
+      `Fetched ${fetchedEvents.length} events, ${duplicateCount} duplicates removed, ${events.length} unique (API reports ${totalCount})`
+    )
+
+    // Stop before writing anything if we did not get exactly what the API reported.
+    if (events.length !== totalCount) {
+      throw new Error(
+        `Count check failed: got ${events.length} unique events but the API reports ${totalCount}. Nothing was written to the database.`
+      )
+    }
 
     const formattedEvents = events.map((event: any) => ({
       campus_labs_id: event.id,
@@ -139,11 +162,14 @@ async function syncEvents() {
 
     if (error) {
       console.error('Supabase insert error:', error)
+      process.exitCode = 1
     } else {
-      console.log('Events synced successfully!')
+      console.log(`Events synced successfully! (${formattedEvents.length} events)`)
     }
   } catch (err) {
     console.error(err)
+    // Non-zero exit code so a scheduled job can detect the failure.
+    process.exitCode = 1
   }
 }
 
