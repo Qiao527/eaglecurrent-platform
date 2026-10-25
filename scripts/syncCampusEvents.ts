@@ -113,6 +113,37 @@ const LOCATION_COORDS: Record<string, [number, number]> = {
         // Between Vandy and Lower = near Vanderslice / Corcoran Commons walkway
         "Between Vandy and Lower": [42.33500, -71.16725],
       };
+// Campus Labs sends coordinates as strings (e.g. "42.339520") or null.
+// Returns a number, or null if the value is missing or not a valid coordinate.
+function parseCoordinate(value: unknown, limit: number): number | null {
+  if (value === null || value === undefined || String(value).trim() === "") {
+    return null;
+  }
+
+  const number = Number(value);
+
+  if (!Number.isFinite(number) || Math.abs(number) > limit) {
+    return null;
+  }
+
+  return number;
+}
+
+// Prefer the coordinates Campus Labs provides. Fall back to the hand-written
+// LOCATION_COORDS table only when Campus Labs has no valid coordinates.
+function getCoordinates(event: any): [number | null, number | null] {
+  const latitude = parseCoordinate(event.latitude, 90);
+  const longitude = parseCoordinate(event.longitude, 180);
+
+  if (latitude !== null && longitude !== null) {
+    return [latitude, longitude];
+  }
+
+  const fallback = LOCATION_COORDS[event.location];
+
+  return fallback ? [fallback[0], fallback[1]] : [null, null];
+}
+
 async function syncEvents() {
   try {
     const { events: fetchedEvents, totalCount } = await fetchAllEvents()
@@ -130,29 +161,39 @@ async function syncEvents() {
       )
     }
 
-    const formattedEvents = events.map((event: any) => ({
-      campus_labs_id: event.id,
-      institution_id: event.institutionId,
-      organization_id: event.organizationId,
-      branch_id: event.branchId,
-      organization_name: event.organizationName,
-      organization_profile_picture:
-        event.organizationProfilePicture,
-      title: event.name,
-      description: event.description,
-      location: event.location,
-      start_time: event.startsOn,
-      end_time: event.endsOn,
-      image_path: event.imagePath,
-      theme: event.theme,
-      visibility: event.visibility,
-      approval_status: event.status,
-      latitude:LOCATION_COORDS[event.location]?.[0] ?? null,
-      longitude:LOCATION_COORDS[event.location]?.[1] ?? null,
-      rec_score: event.recScore,
-      rsvp_total: event.rsvpTotal,
-      search_score: event['@search.score'],
-    }))
+    const formattedEvents = events.map((event: any) => {
+      const [latitude, longitude] = getCoordinates(event)
+
+      return {
+        campus_labs_id: event.id,
+        institution_id: event.institutionId,
+        organization_id: event.organizationId,
+        branch_id: event.branchId,
+        organization_name: event.organizationName,
+        organization_profile_picture:
+          event.organizationProfilePicture,
+        title: event.name,
+        description: event.description,
+        location: event.location,
+        start_time: event.startsOn,
+        end_time: event.endsOn,
+        image_path: event.imagePath,
+        theme: event.theme,
+        visibility: event.visibility,
+        approval_status: event.status,
+        latitude,
+        longitude,
+        rec_score: event.recScore,
+        rsvp_total: event.rsvpTotal,
+        search_score: event['@search.score'],
+      }
+    })
+
+    const mappedCount = formattedEvents.filter(
+      (event) => event.latitude !== null && event.longitude !== null
+    ).length
+
+    console.log(`Events with map coordinates: ${mappedCount} / ${formattedEvents.length}`)
 
     const { error } = await supabase
       .from('events')
