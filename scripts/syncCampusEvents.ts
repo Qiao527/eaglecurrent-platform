@@ -129,19 +129,54 @@ function parseCoordinate(value: unknown, limit: number): number | null {
   return number;
 }
 
+// Center of BC's main campus (same as the map's default center in MapPage.tsx).
+const BC_CAMPUS_CENTER: [number, number] = [42.3355, -71.1685];
+
+// Coordinates farther than this from campus are treated as data errors
+// (e.g. swapped latitude/longitude). 50 km still covers the Boston area.
+const MAX_DISTANCE_FROM_CAMPUS_KM = 50;
+
+// Great-circle distance between two points, in kilometers (haversine formula).
+function distanceKm([lat1, lng1]: [number, number], [lat2, lng2]: [number, number]) {
+  const toRadians = (degrees: number) => (degrees * Math.PI) / 180;
+  const dLat = toRadians(lat2 - lat1);
+  const dLng = toRadians(lng2 - lng1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRadians(lat1)) * Math.cos(toRadians(lat2)) * Math.sin(dLng / 2) ** 2;
+
+  return 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+type CoordinateResult = {
+  latitude: number | null;
+  longitude: number | null;
+  // Set when Campus Labs sent coordinates that we rejected as too far away.
+  rejectedKm: number | null;
+};
+
 // Prefer the coordinates Campus Labs provides. Fall back to the hand-written
-// LOCATION_COORDS table only when Campus Labs has no valid coordinates.
-function getCoordinates(event: any): [number | null, number | null] {
+// LOCATION_COORDS table only when Campus Labs has no usable coordinates.
+function getCoordinates(event: any): CoordinateResult {
   const latitude = parseCoordinate(event.latitude, 90);
   const longitude = parseCoordinate(event.longitude, 180);
+  let rejectedKm: number | null = null;
 
   if (latitude !== null && longitude !== null) {
-    return [latitude, longitude];
+    const km = distanceKm([latitude, longitude], BC_CAMPUS_CENTER);
+
+    if (km <= MAX_DISTANCE_FROM_CAMPUS_KM) {
+      return { latitude, longitude, rejectedKm: null };
+    }
+
+    rejectedKm = Math.round(km);
   }
 
   const fallback = LOCATION_COORDS[event.location];
 
-  return fallback ? [fallback[0], fallback[1]] : [null, null];
+  return fallback
+    ? { latitude: fallback[0], longitude: fallback[1], rejectedKm }
+    : { latitude: null, longitude: null, rejectedKm };
 }
 
 async function syncEvents() {
@@ -161,8 +196,16 @@ async function syncEvents() {
       )
     }
 
+    const rejectedCoordinates: string[] = []
+
     const formattedEvents = events.map((event: any) => {
-      const [latitude, longitude] = getCoordinates(event)
+      const { latitude, longitude, rejectedKm } = getCoordinates(event)
+
+      if (rejectedKm !== null) {
+        rejectedCoordinates.push(
+          `  event ${event.id} "${event.location}": (${event.latitude}, ${event.longitude}) is ${rejectedKm} km from campus`
+        )
+      }
 
       return {
         campus_labs_id: event.id,
@@ -194,6 +237,12 @@ async function syncEvents() {
     ).length
 
     console.log(`Events with map coordinates: ${mappedCount} / ${formattedEvents.length}`)
+
+    if (rejectedCoordinates.length > 0) {
+      console.warn(
+        `Rejected ${rejectedCoordinates.length} coordinates more than ${MAX_DISTANCE_FROM_CAMPUS_KM} km from campus:\n${rejectedCoordinates.join('\n')}`
+      )
+    }
 
     const { error } = await supabase
       .from('events')
